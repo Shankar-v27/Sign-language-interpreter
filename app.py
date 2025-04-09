@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import speech
+# import speech
 import csv
 import copy
 import argparse
@@ -500,7 +500,7 @@ def draw_info_text(image, brect, handedness, hand_sign_text,
 
                
 
-    speech.speak(hand_sign_text)
+    # speech.speak(hand_sign_text)
 
 
 
