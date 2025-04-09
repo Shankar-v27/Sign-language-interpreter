@@ -66,6 +66,12 @@ def main():
         min_detection_confidence=min_detection_confidence,
         min_tracking_confidence=min_tracking_confidence,
     )
+    
+    # Initialize Face Detection
+    mp_face_detection = mp.solutions.face_detection
+    face_detection = mp_face_detection.FaceDetection(
+        min_detection_confidence=0.5
+    )
 
     keypoint_classifier = KeyPointClassifier()
 
@@ -118,12 +124,39 @@ def main():
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
 
         image.flags.writeable = False
-        results = hands.process(image)
+        # Process hands
+        hand_results = hands.process(image)
+        # Process face
+        face_results = face_detection.process(image)
         image.flags.writeable = True
 
-        if results.multi_hand_landmarks is not None:
-            for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
-                                                  results.multi_handedness):
+        # Draw face detection results
+        if face_results.detections:
+            for detection in face_results.detections:
+                # Draw face bounding box
+                bboxC = detection.location_data.relative_bounding_box
+                ih, iw, _ = debug_image.shape
+                bbox = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
+                       int(bboxC.width * iw), int(bboxC.height * ih)
+                cv.rectangle(debug_image, bbox, (0, 255, 0), 2)
+                
+                # Draw face key points
+                for keypoint in detection.location_data.relative_keypoints:
+                    x = int(keypoint.x * iw)
+                    y = int(keypoint.y * ih)
+                    cv.circle(debug_image, (x, y), 3, (0, 255, 255), -1)
+                
+                # Display confidence score
+                cv.putText(debug_image, 
+                          f'{int(detection.score[0]*100)}%', 
+                          (bbox[0], bbox[1] - 20), 
+                          cv.FONT_HERSHEY_SIMPLEX, 
+                          0.6, (0, 255, 0), 2)
+
+        # Hand gesture recognition (existing code)
+        if hand_results.multi_hand_landmarks is not None:
+            for hand_landmarks, handedness in zip(hand_results.multi_hand_landmarks,
+                                                  hand_results.multi_handedness):
                 # Bounding box calculation
                 brect = calc_bounding_rect(debug_image, hand_landmarks)
                 # Landmark calculation
@@ -174,7 +207,7 @@ def main():
         debug_image = draw_info(debug_image, fps, mode, number)
 
         # Screen reflection
-        cv.imshow('Hand Gesture Recognition', debug_image)
+        cv.imshow('Hand Gesture and Face Recognition', debug_image)
 
     cap.release()
     cv.destroyAllWindows()
@@ -497,12 +530,6 @@ def draw_info_text(image, brect, handedness, hand_sign_text,
         info_text = info_text + ':' + hand_sign_text
     cv.putText(image, info_text, (brect[0] + 5, brect[1] - 4),
                cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv.LINE_AA)
-
-               
-
-    # speech.speak(hand_sign_text)
-
-
 
     if finger_gesture_text != "":
         cv.putText(image, "Finger Gesture:" + finger_gesture_text, (10, 60),
