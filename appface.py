@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-# import speech
 import csv
 import copy
 import argparse
@@ -11,6 +10,7 @@ from collections import deque
 import cv2 as cv
 import numpy as np
 import mediapipe as mp
+
 
 from utils import CvFpsCalc
 from model import KeyPointClassifier
@@ -40,174 +40,125 @@ def get_args():
 
 
 def main():
-    # Argument parsing 
     args = get_args()
 
-    cap_device = args.device
-    cap_width = args.width
-    cap_height = args.height
+    cap = cv.VideoCapture(args.device)
+    cap.set(cv.CAP_PROP_FRAME_WIDTH, args.width)
+    cap.set(cv.CAP_PROP_FRAME_HEIGHT, args.height)
 
-    use_static_image_mode = args.use_static_image_mode
-    min_detection_confidence = args.min_detection_confidence
-    min_tracking_confidence = args.min_tracking_confidence
-
-    use_brect = True
-
-    # Camera preparation 
-    cap = cv.VideoCapture(cap_device)
-    cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
-    cap.set(cv.CAP_PROP_FRAME_HEIGHT, cap_height)
-
-    # Model load 
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(
-        static_image_mode=use_static_image_mode,
+        static_image_mode=args.use_static_image_mode,
         max_num_hands=2,
-        min_detection_confidence=min_detection_confidence,
-        min_tracking_confidence=min_tracking_confidence,
+        min_detection_confidence=args.min_detection_confidence,
+        min_tracking_confidence=args.min_tracking_confidence,
     )
     
-    # Initialize Face Detection
     mp_face_detection = mp.solutions.face_detection
-    face_detection = mp_face_detection.FaceDetection(
-        min_detection_confidence=0.5
-    )
+    face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
+
+    # ✅ Load TensorFlow SavedModel
+    import tensorflow as tf
+    emotion_model = tf.saved_model.load(r"C:\Users\shank\Downloads\converted_savedmodel (2)\model.savedmodel")
+    infer = emotion_model.signatures["serving_default"]
+    emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
 
     keypoint_classifier = KeyPointClassifier()
-
     point_history_classifier = PointHistoryClassifier()
 
-    # Read labels 
-    with open('model/keypoint_classifier/keypoint_classifier_label.csv',
-              encoding='utf-8-sig') as f:
-        keypoint_classifier_labels = csv.reader(f)
-        keypoint_classifier_labels = [
-            row[0] for row in keypoint_classifier_labels
-        ]
-    with open(
-            'model/point_history_classifier/point_history_classifier_label.csv',
-            encoding='utf-8-sig') as f:
-        point_history_classifier_labels = csv.reader(f)
-        point_history_classifier_labels = [
-            row[0] for row in point_history_classifier_labels
-        ]
+    with open('model/keypoint_classifier/keypoint_classifier_label.csv', encoding='utf-8-sig') as f:
+        keypoint_classifier_labels = [row[0] for row in csv.reader(f)]
+    with open('model/point_history_classifier/point_history_classifier_label.csv', encoding='utf-8-sig') as f:
+        point_history_classifier_labels = [row[0] for row in csv.reader(f)]
 
-    # FPS Measurement 
     cvFpsCalc = CvFpsCalc(buffer_len=10)
-
-    # Coordinate history 
     history_length = 16
     point_history = deque(maxlen=history_length)
-
-    # Finger gesture history 
     finger_gesture_history = deque(maxlen=history_length)
-
     mode = 0
 
     while True:
         fps = cvFpsCalc.get()
-
-        # Process Key (ESC: end)
         key = cv.waitKey(10)
-        if key == 27:  # ESC
+        if key == 27:
             break
         number, mode = select_mode(key, mode)
 
-        # Camera capture 
         ret, image = cap.read()
         if not ret:
             break
-        image = cv.flip(image, 1)  # Mirror display
+        image = cv.flip(image, 1)
         debug_image = copy.deepcopy(image)
-
-        # Detection implementation 
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
 
         image.flags.writeable = False
-        # Process hands
         hand_results = hands.process(image)
-        # Process face
         face_results = face_detection.process(image)
         image.flags.writeable = True
 
-        # Draw face detection results
         if face_results.detections:
             for detection in face_results.detections:
-                # Draw face bounding box
                 bboxC = detection.location_data.relative_bounding_box
                 ih, iw, _ = debug_image.shape
-                bbox = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
-                       int(bboxC.width * iw), int(bboxC.height * ih)
-                cv.rectangle(debug_image, bbox, (0, 255, 0), 2)
-                
-                # Draw face key points
+                x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
+                face_roi = debug_image[y:y+h, x:x+w]
+
+                if face_roi.size != 0:
+                    try:
+                        face_img = cv.resize(face_roi, (48, 48))
+                        face_img = cv.cvtColor(face_img, cv.COLOR_BGR2GRAY)
+                        face_img = face_img.astype('float32') / 255.0
+                        face_img = np.expand_dims(face_img, axis=(0, -1))
+                        face_tensor = tf.convert_to_tensor(face_img, dtype=tf.float32)
+                        face_tensor = tf.reshape(face_tensor, [1, 48, 48, 1])
+                        prediction = infer(face_tensor)
+                        emotion_prediction = list(prediction.values())[0].numpy()
+                        emotion_label = emotion_labels[np.argmax(emotion_prediction)]
+                        emotion_confidence = np.max(emotion_prediction)
+                    except Exception as e:
+                        print(f"Emotion detection error: {e}")
+                        emotion_label = "Unknown"
+                        emotion_confidence = 0
+                else:
+                    emotion_label = "Unknown"
+                    emotion_confidence = 0
+
+                cv.rectangle(debug_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 for keypoint in detection.location_data.relative_keypoints:
-                    x = int(keypoint.x * iw)
-                    y = int(keypoint.y * ih)
-                    cv.circle(debug_image, (x, y), 3, (0, 255, 255), -1)
-                
-                # Display confidence score
-                cv.putText(debug_image, 
-                          f'{int(detection.score[0]*100)}%', 
-                          (bbox[0], bbox[1] - 20), 
-                          cv.FONT_HERSHEY_SIMPLEX, 
-                          0.6, (0, 255, 0), 2)
+                    x_kp = int(keypoint.x * iw)
+                    y_kp = int(keypoint.y * ih)
+                    cv.circle(debug_image, (x_kp, y_kp), 3, (0, 255, 255), -1)
+                cv.putText(debug_image, f'Emotion: {emotion_label} ({emotion_confidence:.2f})',
+                           (x, y + h + 20), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        # Hand gesture recognition (existing code)
         if hand_results.multi_hand_landmarks is not None:
-            for hand_landmarks, handedness in zip(hand_results.multi_hand_landmarks,
-                                                  hand_results.multi_handedness):
-                # Bounding box calculation
+            for hand_landmarks, handedness in zip(hand_results.multi_hand_landmarks, hand_results.multi_handedness):
                 brect = calc_bounding_rect(debug_image, hand_landmarks)
-                # Landmark calculation
                 landmark_list = calc_landmark_list(debug_image, hand_landmarks)
-
-                # Conversion to relative coordinates / normalized coordinates
-                pre_processed_landmark_list = pre_process_landmark(
-                    landmark_list)
-                pre_processed_point_history_list = pre_process_point_history(
-                    debug_image, point_history)
-                # Write to the dataset file
-                logging_csv(number, mode, pre_processed_landmark_list,
-                            pre_processed_point_history_list)
-
-                # Hand sign classification
+                pre_processed_landmark_list = pre_process_landmark(landmark_list)
+                pre_processed_point_history_list = pre_process_point_history(debug_image, point_history)
+                logging_csv(number, mode, pre_processed_landmark_list, pre_processed_point_history_list)
                 hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
-                if hand_sign_id == 2:  # Point gesture
+                if hand_sign_id == 2:
                     point_history.append(landmark_list[8])
                 else:
                     point_history.append([0, 0])
-
-                # Finger gesture classification
                 finger_gesture_id = 0
-                point_history_len = len(pre_processed_point_history_list)
-                if point_history_len == (history_length * 2):
-                    finger_gesture_id = point_history_classifier(
-                        pre_processed_point_history_list)
-
-                # Calculates the gesture IDs in the latest detection
+                if len(pre_processed_point_history_list) == history_length * 2:
+                    finger_gesture_id = point_history_classifier(pre_processed_point_history_list)
                 finger_gesture_history.append(finger_gesture_id)
-                most_common_fg_id = Counter(
-                    finger_gesture_history).most_common()
-
-                # Drawing part
-                debug_image = draw_bounding_rect(use_brect, debug_image, brect)
+                most_common_fg_id = Counter(finger_gesture_history).most_common()
+                debug_image = draw_bounding_rect(True, debug_image, brect)
                 debug_image = draw_landmarks(debug_image, landmark_list)
-                debug_image = draw_info_text(
-                    debug_image,
-                    brect,
-                    handedness,
-                    keypoint_classifier_labels[hand_sign_id],
-                    point_history_classifier_labels[most_common_fg_id[0][0]],
-                )
+                debug_image = draw_info_text(debug_image, brect, handedness,
+                                             keypoint_classifier_labels[hand_sign_id],
+                                             point_history_classifier_labels[most_common_fg_id[0][0]])
         else:
             point_history.append([0, 0])
 
         debug_image = draw_point_history(debug_image, point_history)
         debug_image = draw_info(debug_image, fps, mode, number)
-
-        # Screen reflection
-        cv.imshow('Hand Gesture and Face Recognition', debug_image)
+        cv.imshow('Hand Gesture, Face & Emotion Recognition', debug_image)
 
     cap.release()
     cv.destroyAllWindows()
