@@ -10,7 +10,7 @@ from collections import deque
 import cv2 as cv
 import numpy as np
 import mediapipe as mp
-
+import tensorflow as tf
 
 from utils import CvFpsCalc
 from model import KeyPointClassifier
@@ -53,15 +53,14 @@ def main():
         min_detection_confidence=args.min_detection_confidence,
         min_tracking_confidence=args.min_tracking_confidence,
     )
-    
+
     mp_face_detection = mp.solutions.face_detection
     face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
 
     # ✅ Load TensorFlow SavedModel
-    import tensorflow as tf
-    emotion_model = tf.saved_model.load(r"C:\Users\shank\Downloads\converted_savedmodel (2)\model.savedmodel")
+    emotion_model = tf.saved_model.load('model/emotion_classifier/model.savedmodel')
     infer = emotion_model.signatures["serving_default"]
-    emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
+    emotion_labels = ['Happy', 'Angry', 'Surprise', 'Sad', 'Fear', 'Disgusted', 'Neutral']
 
     keypoint_classifier = KeyPointClassifier()
     point_history_classifier = PointHistoryClassifier()
@@ -106,21 +105,21 @@ def main():
                 if face_roi.size != 0:
                     try:
                         face_img = cv.resize(face_roi, (48, 48))
-                        face_img = cv.cvtColor(face_img, cv.COLOR_BGR2GRAY)
+                        face_img = cv.cvtColor(face_img, cv.COLOR_BGR2RGB)  # ✅ RGB conversion
                         face_img = face_img.astype('float32') / 255.0
-                        face_img = np.expand_dims(face_img, axis=(0, -1))
+                        face_img = np.expand_dims(face_img, axis=0)  # Shape: (1, 48, 48, 3)
                         face_tensor = tf.convert_to_tensor(face_img, dtype=tf.float32)
-                        face_tensor = tf.reshape(face_tensor, [1, 48, 48, 1])
                         prediction = infer(face_tensor)
                         emotion_prediction = list(prediction.values())[0].numpy()
                         emotion_label = emotion_labels[np.argmax(emotion_prediction)]
                         emotion_confidence = np.max(emotion_prediction)
+                        print(f"[INFO] Emotion: {emotion_label} ({emotion_confidence:.2f})")
                     except Exception as e:
-                        print(f"Emotion detection error: {e}")
-                        emotion_label = "Unknown"
+                        print(f"[ERROR] Emotion detection failed: {e}")
+                        emotion_label = "No Face Detected"
                         emotion_confidence = 0
                 else:
-                    emotion_label = "Unknown"
+                    emotion_label = "No Face Detected"
                     emotion_confidence = 0
 
                 cv.rectangle(debug_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -164,6 +163,7 @@ def main():
     cv.destroyAllWindows()
 
 
+
 def select_mode(key, mode):
     number = -1
     if 48 <= key <= 57:  # 0 ~ 9
@@ -204,8 +204,6 @@ def calc_landmark_list(image, landmarks):
     for _, landmark in enumerate(landmarks.landmark):
         landmark_x = min(int(landmark.x * image_width), image_width - 1)
         landmark_y = min(int(landmark.y * image_height), image_height - 1)
-        # landmark_z = landmark.z
-
         landmark_point.append([landmark_x, landmark_y])
 
     return landmark_point
@@ -275,6 +273,7 @@ def logging_csv(number, mode, landmark_list, point_history_list):
             writer = csv.writer(f)
             writer.writerow([number, *point_history_list])
     return
+
 
 def draw_landmarks(image, landmark_point):
     if len(landmark_point) > 0:
@@ -463,13 +462,14 @@ def draw_landmarks(image, landmark_point):
 
     return image
 
+
 def draw_bounding_rect(use_brect, image, brect):
     if use_brect:
         # Outer rectangle
         cv.rectangle(image, (brect[0], brect[1]), (brect[2], brect[3]),
                      (0, 0, 0), 1)
-
     return image
+
 
 def draw_info_text(image, brect, handedness, hand_sign_text,
                    finger_gesture_text):
@@ -486,18 +486,18 @@ def draw_info_text(image, brect, handedness, hand_sign_text,
         cv.putText(image, "Finger Gesture:" + finger_gesture_text, (10, 60),
                    cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv.LINE_AA)
         cv.putText(image, "Finger Gesture:" + finger_gesture_text, (10, 60),
-                   cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2,
-                   cv.LINE_AA)
+                   cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv.LINE_AA)
 
     return image
+
 
 def draw_point_history(image, point_history):
     for index, point in enumerate(point_history):
         if point[0] != 0 and point[1] != 0:
             cv.circle(image, (point[0], point[1]), 1 + int(index / 2),
                       (152, 251, 152), 2)
-
     return image
+
 
 def draw_info(image, fps, mode, number):
     cv.putText(image, "FPS:" + str(fps), (10, 30), cv.FONT_HERSHEY_SIMPLEX,
@@ -508,13 +508,12 @@ def draw_info(image, fps, mode, number):
     mode_string = ['Logging Key Point', 'Logging Point History']
     if 1 <= mode <= 2:
         cv.putText(image, "MODE:" + mode_string[mode - 1], (10, 90),
-                   cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1,
-                   cv.LINE_AA)
+                   cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv.LINE_AA)
         if 0 <= number <= 9:
             cv.putText(image, "NUM:" + str(number), (10, 110),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1,
-                       cv.LINE_AA)
+                       cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv.LINE_AA)
     return image
+
 
 if __name__ == '__main__':
     main()
