@@ -2,6 +2,6 @@
 1 Angry
 2 Surprise
 3 Sad
-4 Surprised
+4 Fear
 5 Disgusted
 6 Neutral

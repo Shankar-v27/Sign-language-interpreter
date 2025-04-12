@@ -12,6 +12,11 @@ import numpy as np
 import mediapipe as mp
 import tensorflow as tf
 
+from keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dropout, Flatten, Dense, InputLayer
+from tensorflow.keras.utils import custom_object_scope
+import json
+
 from utils import CvFpsCalc
 from model import KeyPointClassifier
 from model import PointHistoryClassifier
@@ -57,10 +62,24 @@ def main():
     mp_face_detection = mp.solutions.face_detection
     face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
 
-    # ✅ Load TensorFlow SavedModel
-    emotion_model = tf.saved_model.load('model/emotion_classifier/model.savedmodel')
-    infer = emotion_model.signatures["serving_default"]
-    emotion_labels = ['Happy', 'Angry', 'Surprise', 'Sad', 'Fear', 'Disgusted', 'Neutral']
+    # ✅ Load Emotion Detection Model (Keras .h5 + .json)
+    emotion_model_path = 'C:/Users/shank/Desktop/AI Interpreter/model/emotion_classifier/'
+    with open(emotion_model_path + 'emotion_model.json', 'r') as json_file:
+        loaded_model_json = json.load(json_file)
+
+    with custom_object_scope({
+        'Sequential': Sequential,
+        'Conv2D': Conv2D,
+        'MaxPooling2D': MaxPooling2D,
+        'Dropout': Dropout,
+        'Flatten': Flatten,
+        'Dense': Dense,
+        'InputLayer': InputLayer,
+    }):
+        emotion_model = Sequential.from_config(loaded_model_json['config'])
+        emotion_model.load_weights(emotion_model_path + 'emotion_model.h5')
+
+    emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
 
     keypoint_classifier = KeyPointClassifier()
     point_history_classifier = PointHistoryClassifier()
@@ -105,12 +124,10 @@ def main():
                 if face_roi.size != 0:
                     try:
                         face_img = cv.resize(face_roi, (48, 48))
-                        face_img = cv.cvtColor(face_img, cv.COLOR_BGR2RGB)  # ✅ RGB conversion
+                        face_img = cv.cvtColor(face_img, cv.COLOR_BGR2RGB)
                         face_img = face_img.astype('float32') / 255.0
-                        face_img = np.expand_dims(face_img, axis=0)  # Shape: (1, 48, 48, 3)
-                        face_tensor = tf.convert_to_tensor(face_img, dtype=tf.float32)
-                        prediction = infer(face_tensor)
-                        emotion_prediction = list(prediction.values())[0].numpy()
+                        face_img = np.expand_dims(face_img, axis=0)
+                        emotion_prediction = emotion_model.predict(face_img, verbose=0)[0]
                         emotion_label = emotion_labels[np.argmax(emotion_prediction)]
                         emotion_confidence = np.max(emotion_prediction)
                         print(f"[INFO] Emotion: {emotion_label} ({emotion_confidence:.2f})")
@@ -161,6 +178,7 @@ def main():
 
     cap.release()
     cv.destroyAllWindows()
+
 
 
 
