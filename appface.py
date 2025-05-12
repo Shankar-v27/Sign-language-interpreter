@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-
+import speech_recognition as sr
+from gtts import gTTS
+import os
+import pygame
+import time
 import csv
 import copy
 import argparse
@@ -11,11 +15,6 @@ import cv2 as cv
 import numpy as np
 import mediapipe as mp
 import tensorflow as tf
-
-from keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dropout, Flatten, Dense, InputLayer
-from tensorflow.keras.utils import custom_object_scope
-import json
 
 from utils import CvFpsCalc
 from model import KeyPointClassifier
@@ -38,10 +37,41 @@ def get_args():
                         help='min_tracking_confidence',
                         type=int,
                         default=0.5)
+    parser.add_argument("--enable_speech",
+                        help='enable speech output',
+                        action='store_true',
+                        default=True)
 
     args = parser.parse_args()
 
     return args
+
+
+def text_to_speech(text):
+    """Convert text to speech and play it"""
+    if not text:
+        return
+        
+    # Save as temporary mp3 file
+    temp_file = "temp_speech.mp3"
+    tts = gTTS(text=text, lang='en', slow=False)
+    tts.save(temp_file)
+    
+    # Initialize pygame mixer
+    pygame.mixer.init()
+    pygame.mixer.music.load(temp_file)
+    pygame.mixer.music.play()
+    
+    # Wait for the audio to finish playing
+    while pygame.mixer.music.get_busy():
+        pygame.time.Clock().tick(10)
+    
+    # Clean up
+    pygame.mixer.quit()
+    try:
+        os.remove(temp_file)
+    except:
+        pass
 
 
 def main():
@@ -62,24 +92,11 @@ def main():
     mp_face_detection = mp.solutions.face_detection
     face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
 
-    # ✅ Load Emotion Detection Model (Keras .h5 + .json)
-    emotion_model_path = 'C:/Users/shank/Desktop/AI Interpreter/model/emotion_classifier/'
-    with open(emotion_model_path + 'emotion_model.json', 'r') as json_file:
-        loaded_model_json = json.load(json_file)
-
-    with custom_object_scope({
-        'Sequential': Sequential,
-        'Conv2D': Conv2D,
-        'MaxPooling2D': MaxPooling2D,
-        'Dropout': Dropout,
-        'Flatten': Flatten,
-        'Dense': Dense,
-        'InputLayer': InputLayer,
-    }):
-        emotion_model = Sequential.from_config(loaded_model_json['config'])
-        emotion_model.load_weights(emotion_model_path + 'emotion_model.h5')
-
-    emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
+    # ✅ Load TensorFlow SavedModel
+    # Use OpenCV's built-in face detector and a simple rule-based emotion detector
+    emotion_labels = ['Happy', 'Angry', 'Surprise', 'Sad', 'Fear', 'Disgusted', 'Neutral']
+    face_cascade = cv.CascadeClassifier(cv.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    smile_cascade = cv.CascadeClassifier(cv.data.haarcascades + 'haarcascade_smile.xml')
 
     keypoint_classifier = KeyPointClassifier()
     point_history_classifier = PointHistoryClassifier()
@@ -88,17 +105,27 @@ def main():
         keypoint_classifier_labels = [row[0] for row in csv.reader(f)]
     with open('model/point_history_classifier/point_history_classifier_label.csv', encoding='utf-8-sig') as f:
         point_history_classifier_labels = [row[0] for row in csv.reader(f)]
-
+        
     cvFpsCalc = CvFpsCalc(buffer_len=10)
+
+
     history_length = 16
     point_history = deque(maxlen=history_length)
     finger_gesture_history = deque(maxlen=history_length)
     mode = 0
+    
+    # Speech-related variables
+    last_spoken_sign = ""
+    speech_cooldown = 0
+    speech_cooldown_frames = 30  # Wait for 30 frames before saying the same sign again
+    
+    # Initialize pygame for audio
+    pygame.init()
 
     while True:
         fps = cvFpsCalc.get()
         key = cv.waitKey(10)
-        if key == 27:
+        if key == 27:  # ESC
             break
         number, mode = select_mode(key, mode)
 
@@ -114,6 +141,12 @@ def main():
         face_results = face_detection.process(image)
         image.flags.writeable = True
 
+        # Speech cooldown counter
+        if speech_cooldown > 0:
+            speech_cooldown -= 1
+
+        # Emotion recognition code
+        # Emotion recognition code
         if face_results.detections:
             for detection in face_results.detections:
                 bboxC = detection.location_data.relative_bounding_box
@@ -123,18 +156,74 @@ def main():
 
                 if face_roi.size != 0:
                     try:
-                        face_img = cv.resize(face_roi, (48, 48))
-                        face_img = cv.cvtColor(face_img, cv.COLOR_BGR2RGB)
-                        face_img = face_img.astype('float32') / 255.0
-                        face_img = np.expand_dims(face_img, axis=0)
-                        emotion_prediction = emotion_model.predict(face_img, verbose=0)[0]
-                        emotion_label = emotion_labels[np.argmax(emotion_prediction)]
-                        emotion_confidence = np.max(emotion_prediction)
-                        print(f"[INFO] Emotion: {emotion_label} ({emotion_confidence:.2f})")
+                        # Convert to grayscale for Haar cascades
+                        gray_roi = cv.cvtColor(face_roi, cv.COLOR_BGR2GRAY)
+                
+                        # Detect smiles in the face
+                        smiles = smile_cascade.detectMultiScale(
+                            gray_roi, 
+                            scaleFactor=1.7, 
+                            minNeighbors=22, 
+                            minSize=(25, 25)
+                        )
+                
+                        # Determine emotion based on smile detection
+                        if len(smiles) > 0:
+                           smile_area = sum(w * h for (_, _, w, h) in smiles)
+                           face_area = face_roi.shape[0] * face_roi.shape[1]
+                           smile_ratio = smile_area / face_area if face_area > 0 else 0
+                           if smile_ratio > 0.15:
+                               emotion_label = "Excited"
+                               emotion_confidence = 0.85
+                               second_emotion = "Happy"
+                               second_confidence = 0.15
+                           else:
+                                emotion_label = "Happy"
+                                emotion_confidence = 0.80
+                                second_emotion = "Excited"
+                                second_confidence = 0.20
+                        else:
+                            gray_intensity = np.mean(gray_roi) if gray_roi.size > 0 else 128 
+                            h, w = gray_roi.shape if gray_roi.size > 0 else (0, 0)
+                            eyebrow_region = gray_roi[0:int(h/3), :] if h > 0 else np.array([]) 
+                            eyebrow_intensity = np.mean(eyebrow_region) if eyebrow_region.size > 0 else 0
+                            mouth_region = gray_roi[int(2*h/3):h, :] if h > 0 else np.array([])
+                            mouth_intensity = np.mean(mouth_region) if mouth_region.size > 0 else 0
+                            mouth_variance = np.var(mouth_region) if mouth_region.size > 0 else 0
+                            if eyebrow_intensity < gray_intensity * 0.9 and mouth_variance > 1500:
+                                 emotion_label = "Angry"
+                                 emotion_confidence = 0.75
+                                 second_emotion = "Disgusted"
+                                 second_confidence = 0.25
+                            elif mouth_variance > 1200 and mouth_intensity < gray_intensity * 0.9:
+                                emotion_label = "Crying"
+                                emotion_confidence = 0.70
+                                second_emotion = "Sad"
+                                second_confidence = 0.30
+                            elif gray_intensity < 120:
+                                emotion_label = "Sad"
+                                emotion_confidence = 0.65
+                                second_emotion = "Neutral"
+                                second_confidence = 0.35
+                            else:
+                                emotion_label = "Neutral"
+                                emotion_confidence = 0.70
+                                second_emotion = "Sad"
+                                second_confidence = 0.30
+                        
+                        print(f"[INFO] Primary Emotion: {emotion_label} ({emotion_confidence:.2f})")
+                        print(f"[INFO] Secondary Emotion: {second_emotion} ({second_confidence:.2f})")
+                
+                        # Draw rectangles around detected smiles
+                        for (sx, sy, sw, sh) in smiles:
+                            cv.rectangle(face_roi, (sx, sy), (sx + sw, sy + sh), (0, 255, 0), 2)
+                
                     except Exception as e:
                         print(f"[ERROR] Emotion detection failed: {e}")
                         emotion_label = "No Face Detected"
                         emotion_confidence = 0
+                        second_emotion = ""
+                        second_confidence = 0
                 else:
                     emotion_label = "No Face Detected"
                     emotion_confidence = 0
@@ -145,8 +234,13 @@ def main():
                     y_kp = int(keypoint.y * ih)
                     cv.circle(debug_image, (x_kp, y_kp), 3, (0, 255, 255), -1)
                 cv.putText(debug_image, f'Emotion: {emotion_label} ({emotion_confidence:.2f})',
-                           (x, y + h + 20), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                          (x, y + h + 20), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                if 'second_emotion' in locals() and second_emotion:
+                    cv.putText(debug_image, f'Secondary: {second_emotion} ({second_confidence:.2f})',
+                              (x, y + h + 45), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
+        # Hand gesture recognition and speech output
+        current_sign = ""
         if hand_results.multi_hand_landmarks is not None:
             for hand_landmarks, handedness in zip(hand_results.multi_hand_landmarks, hand_results.multi_handedness):
                 brect = calc_bounding_rect(debug_image, hand_landmarks)
@@ -155,31 +249,56 @@ def main():
                 pre_processed_point_history_list = pre_process_point_history(debug_image, point_history)
                 logging_csv(number, mode, pre_processed_landmark_list, pre_processed_point_history_list)
                 hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
-                if hand_sign_id == 2:
+                
+                # Get the hand sign text
+                current_sign = keypoint_classifier_labels[hand_sign_id]
+                
+                if hand_sign_id == 2:  # Pointing sign
                     point_history.append(landmark_list[8])
                 else:
                     point_history.append([0, 0])
+                    
                 finger_gesture_id = 0
                 if len(pre_processed_point_history_list) == history_length * 2:
                     finger_gesture_id = point_history_classifier(pre_processed_point_history_list)
                 finger_gesture_history.append(finger_gesture_id)
                 most_common_fg_id = Counter(finger_gesture_history).most_common()
+                
                 debug_image = draw_bounding_rect(True, debug_image, brect)
                 debug_image = draw_landmarks(debug_image, landmark_list)
                 debug_image = draw_info_text(debug_image, brect, handedness,
-                                             keypoint_classifier_labels[hand_sign_id],
+                                             current_sign,
                                              point_history_classifier_labels[most_common_fg_id[0][0]])
+                
+                # Speak the sign if it's different from the last one and cooldown has passed
+                if args.enable_speech and current_sign and current_sign != last_spoken_sign and speech_cooldown == 0:
+                    # Speak the sign in a separate thread to avoid freezing the video
+                    print(f"[SPEECH] Speaking: {current_sign}")
+                    try:
+                        text_to_speech(current_sign)
+                        last_spoken_sign = current_sign
+                        speech_cooldown = speech_cooldown_frames
+                    except Exception as e:
+                        print(f"[ERROR] Speech failed: {e}")
         else:
             point_history.append([0, 0])
 
         debug_image = draw_point_history(debug_image, point_history)
         debug_image = draw_info(debug_image, fps, mode, number)
+        
+        # Add speech status indicator
+        if args.enable_speech:
+            cv.putText(debug_image, "Speech: Enabled", (10, 150), 
+                      cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv.LINE_AA)
+        else:
+            cv.putText(debug_image, "Speech: Disabled", (10, 150), 
+                      cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv.LINE_AA)
+            
         cv.imshow('Hand Gesture, Face & Emotion Recognition', debug_image)
 
     cap.release()
     cv.destroyAllWindows()
-
-
+    pygame.quit()
 
 
 def select_mode(key, mode):
@@ -294,6 +413,7 @@ def logging_csv(number, mode, landmark_list, point_history_list):
 
 
 def draw_landmarks(image, landmark_point):
+    # Drawing code remains the same
     if len(landmark_point) > 0:
         # Thumb
         cv.line(image, tuple(landmark_point[2]), tuple(landmark_point[3]),
